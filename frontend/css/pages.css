@@ -1356,3 +1356,22 @@
     from { opacity: 0; }
     to { opacity: 1; }
 }
+
+
+/* ===== RAG research brief ================================================== */
+.brief-card h4 { margin: var(--space-5) 0 var(--space-2); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); }
+.brief-summary { font-size: var(--text-base); line-height: 1.6; }
+.brief-list { padding-left: var(--space-5); display: grid; gap: var(--space-3); font-size: var(--text-sm); line-height: 1.55; }
+.brief-why, .brief-empty { color: var(--text-secondary); font-size: var(--text-xs); }
+.brief-note { margin-top: var(--space-3); padding: var(--space-3); background: var(--primary-50); border-radius: var(--radius-md); font-size: var(--text-xs); }
+.brief-foot { margin-top: var(--space-5); font-size: var(--text-xs); color: var(--text-tertiary); }
+.cite-chip { display: inline-block; margin-left: 4px; padding: 1px 7px; border: 1px solid var(--primary-500); border-radius: 999px; background: var(--primary-50); color: var(--primary-600); font-size: 11px; font-weight: 600; cursor: pointer; }
+.cite-chip:hover { background: var(--primary-500); color: #fff; }
+.cite-chip.static { cursor: default; flex-shrink: 0; margin: 2px 0 0; }
+.cite-chip.static:hover { background: var(--primary-50); color: var(--primary-600); }
+.sources-card summary { cursor: pointer; display: flex; gap: var(--space-3); align-items: baseline; flex-wrap: wrap; }
+.source-item { display: flex; gap: var(--space-3); padding: var(--space-3) 0; border-top: 1px solid var(--neutral-100); font-size: var(--text-sm); }
+.source-item:first-of-type { margin-top: var(--space-3); }
+.source-text { color: var(--text-secondary); margin-top: 2px; overflow-wrap: anywhere; }
+.source-item.flash { background: var(--primary-50); transition: background .3s; }
+.match-why { margin: -4px 0 0; padding: var(--space-2) var(--space-4); font-size: var(--text-xs); color: var(--text-secondary); }

@@ -12,7 +12,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,6 +34,8 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from engine import custody_days, search_cases, rule_assessment, database_stats
+from services import rag as rag_service
+from services import lawyer_match
 
 DB_PATH = ROOT / "bail_reckoner.db"
 FRONTEND = ROOT / "frontend"
@@ -123,6 +125,31 @@ class CaseReviewRequest(BaseModel):
     witness_risk: bool = False
     evidence_risk: bool = False
     case_facts: str = ""
+    top_k: int = 5
+
+
+class RagAnalyzeRequest(CaseReviewRequest):
+    """Case review plus the optional context used by the RAG brief and lawyer suggestions."""
+    redact_terms: list[str] = []
+    retrieval_query: str = ""
+    court: str = ""
+    region: str = ""
+    languages: list[str] = []
+
+
+class RagExtractRequest(BaseModel):
+    text: str
+    redact_terms: list[str] = []
+
+
+class LawyerMatchRequest(BaseModel):
+    acts: list[str] = []
+    categories: list[str] = []
+    court: str = ""
+    region: str = ""
+    languages: list[str] = []
+    min_experience: int = 0
+    availability: str = ""
     top_k: int = 5
 
 
@@ -233,6 +260,96 @@ async def review_case(req: CaseReviewRequest):
         "assessment": assessment,
         "similar_cases": similar,
     }
+
+
+# ---- RAG: extraction, cited brief, lawyer suggestions ----------------------
+# These routes can spend Anthropic API credit, so they are rate-limited per client.
+
+import os as _os
+import time as _time
+from collections import defaultdict as _defaultdict, deque as _deque
+
+_RAG_CALLS: dict = _defaultdict(_deque)
+
+
+def _rag_rate_limit(request: Request) -> None:
+    limit = int(_os.getenv("RAG_MAX_CALLS_PER_HOUR", "30"))
+    who = request.client.host if request.client else "unknown"
+    now = _time.time()
+    calls = _RAG_CALLS[who]
+    while calls and now - calls[0] > 3600:
+        calls.popleft()
+    if len(calls) >= limit:
+        raise HTTPException(status_code=429, detail=f"Hourly limit of {limit} AI requests reached. Try again later.")
+    calls.append(now)
+
+
+@app.get("/api/rag/status")
+async def rag_status():
+    from services import rag_retrieval
+    return {"llm_configured": rag_service.llm_available(),
+            "model": _os.getenv("ANTHROPIC_MODEL", rag_service.DEFAULT_MODEL),
+            "retrieval_mode": rag_retrieval.get_index().mode}
+
+
+@app.post("/api/rag/extract-fields")
+async def rag_extract_fields(req: RagExtractRequest, request: Request):
+    """Read chargesheet text and return the form fields it states (for the user to review)."""
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="No text to read.")
+    if not rag_service.llm_available():
+        raise HTTPException(status_code=503, detail="AI field extraction is not configured (ANTHROPIC_API_KEY missing).")
+    _rag_rate_limit(request)
+    try:
+        return rag_service.extract_fields(req.text, req.redact_terms)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Field extraction failed ({type(exc).__name__}). You can fill the form manually.")
+
+
+@app.post("/api/rag/analyze")
+async def rag_analyze(req: RagAnalyzeRequest, request: Request):
+    """Retrieve similar judgments, write a cited brief, and suggest lawyers."""
+    days = 0
+    if req.arrest_date:
+        try:
+            days = custody_days(req.arrest_date)
+        except Exception:
+            pass
+    assessment = rule_assessment(req.sections, req.special_laws, req.bail_type, days, req.charge_sheet_filed,
+                                 req.first_time_offender, req.flight_risk, req.witness_risk, req.evidence_risk)
+    if rag_service.llm_available():
+        _rag_rate_limit(request)
+    case_input = {"sections": req.sections, "special_laws": req.special_laws, "bail_type": req.bail_type,
+                  "arrest_date": req.arrest_date, "charge_sheet_filed": req.charge_sheet_filed,
+                  "first_time_offender": req.first_time_offender, "flight_risk": req.flight_risk,
+                  "witness_risk": req.witness_risk, "evidence_risk": req.evidence_risk, "facts": req.case_facts}
+    if not (req.sections.strip() or req.special_laws.strip() or req.case_facts.strip()):
+        raise HTTPException(status_code=400, detail="Enter sections or case facts to analyze.")
+    result = rag_service.analyze(case_input, days, assessment, top_k=max(3, min(req.top_k + 1, 8)),
+                                 redact_terms=req.redact_terms, retrieval_query=req.retrieval_query)
+    result["lawyers"] = lawyer_match.match(result["acts"], result["categories"], req.court, req.region, req.languages)
+    result["custody_days"] = days
+    result["assessment"] = assessment
+    return result
+
+
+@app.get("/api/lawyers")
+async def list_lawyers():
+    return {"sample_data": True, "lawyers": lawyer_match.load_lawyers()}
+
+
+@app.get("/api/lawyers/{lawyer_id}")
+async def get_lawyer_profile(lawyer_id: int):
+    lawyer = lawyer_match.get_lawyer(lawyer_id)
+    if not lawyer:
+        raise HTTPException(status_code=404, detail="Lawyer not found")
+    return lawyer
+
+
+@app.post("/api/lawyers/match")
+async def match_lawyers(req: LawyerMatchRequest):
+    return {"sample_data": True, "lawyers": lawyer_match.match(req.acts, req.categories, req.court, req.region,
+                                                               req.languages, req.min_experience, req.availability, req.top_k)}
 
 
 # ---- Judgment Search -------------------------------------------------------

@@ -8,7 +8,10 @@ import { sampleLawyers } from '../data.js';
 export function render() {
     const role = getRole();
     const roleName = localStorage.getItem('br_role_name') || 'User';
-    const l = sampleLawyers[0]; // Default to first lawyer
+    const wanted = Number(new URLSearchParams((window.location.hash.split('?')[1] || '')).get('id')) || 1;
+    let cached = [];
+    try { cached = JSON.parse(sessionStorage.getItem('ny_lawyers') || '[]'); } catch (e) { /* ignore */ }
+    const l = cached.find(x => x.id === wanted) || sampleLawyers.find(x => x.id === wanted) || sampleLawyers[0];
 
     return `
     <div class="layout-app">

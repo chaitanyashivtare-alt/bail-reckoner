@@ -186,6 +186,40 @@ The primary system is semantic retrieval using `sentence-transformers/all-MiniLM
 
 The optional `evaluate.py` experiment uses stratified train/validation/test splits and TF-IDF plus balanced logistic regression. It reports class counts, accuracy, precision, recall, F1, and confusion matrix. It is an experimental benchmark only and must never be used to make a legal decision; retrieval is preferred because it exposes source cases and reasoning.
 
+## RAG research brief (new)
+
+Upload a text-based chargesheet PDF on **Analyze Your Case**. Optionally press **Auto-fill** to have Claude read the text and fill the form (you review every field), then **Analyze**. The result page now shows:
+
+- a **cited research brief**: applicable provisions, how similar judgments were decided and why, procedural issues to discuss with a lawyer, case-specific questions, and what the document does not state. Every point carries source chips (`C1`, `S1`, `R1`, `L1`, `K1`) that open the exact passage, statute-table row, custody rule, landmark judgment or checklist item it came from;
+- the retrieved judgments with a plain-language reason for each match ("shares section 302", "same Act: NDPS");
+- **suggested lawyers** with the reasons for each suggestion.
+
+```
+chargesheet PDF -> text -> (optional) Claude field extraction -> form
+form -> hybrid retrieval -> numbered sources -> Claude (forced structured output) -> validation -> page
+```
+
+**Retrieval** (`services/rag_retrieval.py`): judgments are split into field-level chunks (facts, legal issues, reasoning, summary). BM25 ranks chunks by exact words and section numbers; an optional dense index adds embeddings (`python ml/build_rag_index.py`); results are fused with Reciprocal Rank Fusion and rolled up to cases with explainable boosts for shared sections (IPC and BNS numbering are mapped through the `offenses` table), shared Acts (NDPS, POCSO, UAPA, PMLA, ...) and crime category. Statutes are detected from the judgment text because the `special_laws` column is almost always empty.
+
+**Generation** (`services/rag.py`): Claude may only use the numbered sources it is given. The server then validates the output: unknown citations are removed, items left without a source are tagged "No source: verify", and any sentence that predicts or recommends a bail outcome is dropped. Outcome counts are computed by the server, not the model.
+
+**Privacy**: phone numbers, ID numbers, e-mail and labelled name/address lines are masked before text leaves the server, and the user can list names to hide. Names written inside sentences cannot be found automatically; this is best-effort, so do not use real client data without a data-processing agreement.
+
+**Setup**
+
+```powershell
+python -m pip install -r requirements.txt -r requirements-web.txt
+copy .env.example .env      # then set ANTHROPIC_API_KEY
+python run_web.py
+python -m pytest test_rag.py -q       # offline tests, no API key needed
+python ml\eval_retrieval.py           # retrieval comparison
+# optional: python ml\build_rag_index.py   (downloads a sentence-transformer model)
+```
+
+**Lawyer suggestions** use `data/lawyers.json` (12 fictional sample profiles) and a transparent scoring rule in `services/lawyer_match.py`. They are not a ranking of quality: the data contains no track record, and ranking lawyers is not appropriate without verified, consented data.
+
+**Limits**: the corpus is 1,184 judgments, so many cases will have no close precedent. The brief is only as good as the retrieved sources; check every point with a qualified lawyer. The retrieval evaluation uses shared sections/Acts as a proxy for relevance and is not a measure of legal relevance. Scanned PDFs still need OCR.
+
 ## Limitations and Next Steps
 
 The source summaries are not authoritative law, section mappings need verification against current bare Acts, and similarity is not legal relevance. Add authoritative citations and provenance, improve section parsing, review duplicates manually, add automated tests, and conduct legal expert validation before any real-world use.

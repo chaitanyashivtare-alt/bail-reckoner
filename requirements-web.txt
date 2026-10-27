@@ -13,3 +13,7 @@ cryptography>=42.0
 
 # Environment
 python-dotenv>=1.0
+
+# RAG brief (Claude API) and hybrid retrieval
+anthropic>=0.40
+rank-bm25>=0.2.2

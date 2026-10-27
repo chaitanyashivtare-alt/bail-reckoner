@@ -45,3 +45,5 @@ desktop.ini
 
 # Node (if ever used)
 node_modules/
+vector_store/chunk_vectors.npy
+vector_store/chunk_model.txt

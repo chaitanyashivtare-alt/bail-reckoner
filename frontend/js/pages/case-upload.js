@@ -33,7 +33,7 @@ export function render() {
             <div class="upload-page" style="margin-top: var(--space-6)">
                 <div class="upload-container">
                     ${uploadZone('case-file')}
-                    <p style="font-size:var(--text-xs); color:var(--text-tertiary); margin-top:var(--space-3)">The selected PDF is sent to this NyaySetu server for text extraction. It is not added to the app’s case document library. Extracted text is included in your case review and kept in this browser tab’s session. Check and edit the text before continuing. Scanned PDFs are not readable yet.</p>
+                    <p style="font-size:var(--text-xs); color:var(--text-tertiary); margin-top:var(--space-3)">The selected PDF is sent to this NyaySetu server for text extraction. It is not added to the app’s case document library. Extracted text is included in your case review and kept in this browser tab’s session. Check and edit the text before continuing. Scanned PDFs are not readable yet. Nothing is sent to the Claude AI service until you press <strong>Auto-fill</strong> or <strong>Analyze</strong>; phone, ID, e-mail and labelled name/address lines are masked first.</p>
                     
                     <div class="divider-text" style="margin: var(--space-6) 0">Or enter case details manually</div>
                     
@@ -97,6 +97,12 @@ export function render() {
                             <label class="form-label">Case Facts and Legal Issues</label>
                             <textarea class="form-textarea" id="inp-facts" rows="6" placeholder="Enter relevant facts, or upload a text-based PDF above to extract its text. Review and remove anything you do not want to submit."></textarea>
                         </div>
+                        <div class="form-group" style="margin-top: var(--space-4)">
+                            <label class="form-label">Names or places to hide from the AI (optional, comma-separated)</label>
+                            <input type="text" class="form-input" id="inp-redact" placeholder="e.g., Vikram Joshi, Neha Joshi, Wanowrie">
+                            <p style="font-size:var(--text-xs); color:var(--text-tertiary); margin-top:var(--space-2)">Names inside sentences cannot be found automatically. List them here and they are replaced with [REDACTED] before text leaves this server.</p>
+                        </div>
+                        <button class="btn btn-outline w-full" style="margin-top: var(--space-4)" id="autofill-btn" type="button">✨ Auto-fill the form from this text (uses Claude AI)</button>
                         <button class="btn btn-primary btn-lg w-full" style="margin-top: var(--space-6)" id="analyze-btn">
                             ${icons.search} Start Analysis
                         </button>
@@ -126,9 +132,50 @@ const analysisSteps = [
     'Reading the information you submitted',
     'Calculating custody duration when an arrest date is provided',
     'Checking rule-based review triggers',
-    'Searching the available judgment collection',
-    'Preparing results for human review',
+    'Searching judgments by wording, sections and statute',
+    'Writing a cited brief from the retrieved sources',
+    'Matching lawyers to the case type and court',
 ];
+
+// Details the AI read from the document; sent along with the analysis request.
+let extracted = { retrieval_query: '', court: '', region: '' };
+
+function redactTerms() {
+    return (document.getElementById('inp-redact')?.value || '').split(',').map(t => t.trim()).filter(Boolean);
+}
+
+async function autofill() {
+    const facts = document.getElementById('inp-facts')?.value || '';
+    if (facts.trim().length < 40) {
+        showToast('Upload a PDF or paste the chargesheet text first.', 'warning');
+        return;
+    }
+    const btn = document.getElementById('autofill-btn');
+    btn.disabled = true;
+    btn.textContent = 'Reading the document…';
+    try {
+        const d = await api.ragExtractFields(facts, redactTerms());
+        const set = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined && v !== null) el.value = v; };
+        const check = (id, v) => { const el = document.getElementById(id); if (el) el.checked = Boolean(v); };
+        set('inp-sections', d.sections || '');
+        set('inp-special', d.special_laws || '');
+        set('inp-bail-type', d.bail_type || 'Regular');
+        set('inp-arrest', d.arrest_date || '');
+        check('inp-chargesheet', d.charge_sheet_filed);
+        check('inp-firsttime', d.first_time_offender);
+        check('inp-flight', d.flight_risk);
+        check('inp-witness', d.witness_risk);
+        check('inp-evidence', d.evidence_risk);
+        extracted = { retrieval_query: d.retrieval_query || '', court: d.court || '', region: d.region || '' };
+        const gaps = (d.missing_information || []).length ? ` Not stated in the document: ${d.missing_information.slice(0, 3).join('; ')}.` : '';
+        showToast('Form filled from your document. Check every field before analysing.' + gaps, 'success');
+    } catch (error) {
+        showToast(error.message || 'Auto-fill is unavailable. Please fill the form manually.', 'warning');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '✨ Auto-fill the form from this text (uses Claude AI)';
+    }
+}
 
 export function init() {
     // Upload zone interactions
@@ -154,6 +201,8 @@ export function init() {
 
     // Analyze button
     document.getElementById('analyze-btn')?.addEventListener('click', runAnalysis);
+    document.getElementById('autofill-btn')?.addEventListener('click', autofill);
+    extracted = { retrieval_query: '', court: '', region: '' };
 }
 
 async function handleFile(file) {
@@ -179,7 +228,7 @@ async function handleFile(file) {
         zone.querySelector('.upload-icon').textContent = '✓';
         zone.querySelector('.upload-formats').innerHTML = badge('Text ready', 'success');
         factsField.focus();
-        showToast(`${detail} Review it before analysis.`, result.truncated ? 'warning' : 'success');
+        showToast(`${detail} Review it, then press Auto-fill to pre-fill the form.`, result.truncated ? 'warning' : 'success');
     } catch (error) {
         zone.querySelector('.upload-hint').textContent = 'Text could not be extracted. You can still enter facts manually below.';
         zone.querySelector('.upload-icon').textContent = '⚠️';
@@ -211,51 +260,56 @@ async function runAnalysis() {
     progress.style.display = 'block';
     progress.scrollIntoView({ behavior: 'smooth' });
 
-    // Animate steps
+    // Start the request first, then animate the steps while it runs
+    const payload = {
+        sections,
+        special_laws: specialLaws,
+        bail_type: bailType,
+        arrest_date: arrestDate,
+        charge_sheet_filed: chargeSheet,
+        first_time_offender: firstTime,
+        flight_risk: flight,
+        witness_risk: witness,
+        evidence_risk: evidence,
+        case_facts: facts,
+        top_k: 5,
+        redact_terms: redactTerms(),
+        retrieval_query: extracted.retrieval_query,
+        court: extracted.court,
+        region: extracted.region,
+    };
+    let finished = false;
+    const request = api.ragAnalyze(payload).catch(async err => {
+        // RAG service unavailable: fall back to the original review so the page still works.
+        const basic = await api.reviewCase({ ...payload, top_k: 5 });
+        return { ...basic, brief: null, brief_status: 'error', brief_message: `The AI brief is unavailable (${err.message}). Showing the standard review.`, lawyers: [] };
+    }).finally(() => { finished = true; });
+
     const stepsContainer = document.getElementById('analysis-steps');
-    for (let i = 0; i < analysisSteps.length; i++) {
+    const draw = (active) => {
         stepsContainer.innerHTML = analysisSteps.map((step, j) => `
-            <div class="analysis-step ${j < i ? 'done' : j === i ? 'active' : 'pending'}">
-                <div class="step-icon">${j < i ? '✓' : j === i ? '<div class="spinner"></div>' : (j + 1)}</div>
+            <div class="analysis-step ${j < active ? 'done' : j === active ? 'active' : 'pending'}">
+                <div class="step-icon">${j < active ? '✓' : j === active ? '<div class="spinner"></div>' : (j + 1)}</div>
                 <div class="step-text">${step}</div>
             </div>
         `).join('');
-        await delay(600);
+    };
+    for (let i = 0; i < analysisSteps.length - 1 && !finished; i++) {
+        draw(i);
+        await delay(i < 3 ? 500 : 1800);
     }
+    if (!finished) draw(analysisSteps.length - 1);
 
-    // Call API
     try {
-        const result = await api.reviewCase({
-            sections,
-            special_laws: specialLaws,
-            bail_type: bailType,
-            arrest_date: arrestDate,
-            charge_sheet_filed: chargeSheet,
-            first_time_offender: firstTime,
-            flight_risk: flight,
-            witness_risk: witness,
-            evidence_risk: evidence,
-            case_facts: facts,
-            top_k: 5,
-        });
+        const result = await request;
 
-        // Store result
         setCurrentCase({
             ...result,
-            input: { sections, specialLaws, bailType, arrestDate, chargeSheet, firstTime, flight, witness, evidence, facts },
+            input: { sections, specialLaws, bailType, arrestDate, chargeSheet, firstTime, flight, witness, evidence, facts, court: extracted.court, region: extracted.region },
         });
 
-        // Show done
-        stepsContainer.innerHTML = analysisSteps.map((step) => `
-            <div class="analysis-step done">
-                <div class="step-icon">✓</div>
-                <div class="step-text">${step}</div>
-            </div>
-        `).join('');
-
-        await delay(500);
-
-        // Redirect to analysis results
+        draw(analysisSteps.length);
+        await delay(400);
         window.location.hash = '#/case-analysis';
 
     } catch (err) {

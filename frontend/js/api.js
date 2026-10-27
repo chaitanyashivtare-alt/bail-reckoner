@@ -67,6 +67,28 @@ export async function reviewCase(data) {
     return request('POST', '/api/case/review', data);
 }
 
+// ===== RAG: auto-fill, cited brief, lawyer suggestions ========================
+
+export async function ragStatus() {
+    return request('GET', '/api/rag/status');
+}
+
+export async function ragExtractFields(text, redactTerms = []) {
+    return request('POST', '/api/rag/extract-fields', { text, redact_terms: redactTerms });
+}
+
+export async function ragAnalyze(data) {
+    return request('POST', '/api/rag/analyze', data);
+}
+
+export async function listLawyers() {
+    return request('GET', '/api/lawyers');
+}
+
+export async function matchLawyers(data) {
+    return request('POST', '/api/lawyers/match', data);
+}
+
 /** Extract selectable PDF text for the case review flow (the API does not store the file). */
 export async function extractCaseText(file) {
     const formData = new FormData();
