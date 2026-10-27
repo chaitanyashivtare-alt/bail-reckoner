@@ -14,6 +14,5 @@ cryptography>=42.0
 # Environment
 python-dotenv>=1.0
 
-# RAG brief (Claude API) and hybrid retrieval
-anthropic>=0.40
+# RAG brief (local model via Ollama, see services/llm.py) and hybrid retrieval
 rank-bm25>=0.2.2

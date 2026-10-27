@@ -2,13 +2,13 @@
 
 Design rules
 ------------
-* Claude only writes from numbered sources we hand it: judgment excerpts [C#], statute table
+* The local model (Ollama) only writes from numbered sources we hand it: judgment excerpts [C#], statute table
   rows [S#], custody rules [R#], landmark judgments [L#], checklist items [K#].
 * The server, not the model, counts outcomes and validates citations. Items whose citations do
   not exist are flagged; items that predict or recommend a bail outcome are dropped.
-* If no API key is configured or the call fails, the caller still gets retrieval results and the
+* If the local model is not running or the call fails, the caller still gets retrieval results and the
   rule-based triggers; only the written brief is missing.
-* Personal identifiers are masked before text leaves the server (see ``mask_pii``).
+* Personal identifiers are masked before text reaches the model (see ``mask_pii``).
 """
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from services import rag_retrieval
+from services import llm, rag_retrieval
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "bail_reckoner.db"
 
-DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_MODEL = llm.DEFAULT_MODEL
 MAX_FACT_CHARS = 9000
 
 DISCLAIMER = ("Informational research support only. This is not legal advice and does not predict, "
@@ -80,41 +80,26 @@ def mask_pii(text: str, redact_terms: list[str] | None = None) -> tuple[str, dic
 
 
 # ----------------------------------------------------------------------------
-# Claude client (injectable for tests)
+# Local model access (Ollama, see services/llm.py). Replaceable in tests.
 # ----------------------------------------------------------------------------
-_client_override = None
+_llm_override = None  # test hook: fn(system, user, tool, max_tokens) -> dict
 
 
-def set_client_for_tests(client) -> None:
-    global _client_override
-    _client_override = client
+def set_client_for_tests(fake) -> None:
+    """Swap the local model for a fake. Pass None to use the real local model again."""
+    global _llm_override
+    _llm_override = fake
 
 
 def llm_available() -> bool:
-    return _client_override is not None or bool(os.getenv("ANTHROPIC_API_KEY"))
-
-
-def _get_client():
-    if _client_override is not None:
-        return _client_override
-    import anthropic
-    return anthropic.Anthropic(timeout=90.0, max_retries=2)
+    return _llm_override is not None or llm.available()
 
 
 def _call_tool(system: str, user: str, tool: dict, max_tokens: int = 4000) -> dict:
-    client = _get_client()
-    resp = client.messages.create(
-        model=os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL),
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        tools=[tool],
-        tool_choice={"type": "tool", "name": tool["name"]},
-    )
-    for block in resp.content:
-        if getattr(block, "type", None) == "tool_use":
-            return dict(block.input)
-    raise RuntimeError("Model did not return structured output")
+    """One structured answer that matches the tool's input_schema."""
+    if _llm_override is not None:
+        return _llm_override(system, user, tool, max_tokens)
+    return llm.call_structured(system, user, tool["input_schema"], max_tokens)
 
 
 # ----------------------------------------------------------------------------
@@ -157,7 +142,7 @@ EXTRACT_SYSTEM = (
 
 def extract_fields(text: str, redact_terms: list[str] | None = None) -> dict:
     if not llm_available():
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        raise RuntimeError("The local AI model (Ollama) is not running")
     masked, counts = mask_pii(text[:MAX_FACT_CHARS * 2], redact_terms)
     data = _call_tool(EXTRACT_SYSTEM, f"<document>\n{masked}\n</document>", EXTRACT_TOOL, max_tokens=1500)
     data["privacy"] = {"masked": counts}
@@ -219,7 +204,7 @@ def reference_sources(sections_text: str, special_laws_text: str, bail_type: str
 
 
 # ----------------------------------------------------------------------------
-# Step 3: build numbered sources and ask Claude for a cited brief
+# Step 3: build numbered sources and ask the local model for a cited brief
 # ----------------------------------------------------------------------------
 
 def build_sources(similar: list[dict], ref: dict) -> tuple[dict, str]:
@@ -340,7 +325,7 @@ def generate_brief(case_input: dict, custody_days: int, assessment: dict, simila
         f"Facts and legal issues:\n{facts}\n</case>\n\n"
         f"<rule_based_triggers>\n" + "\n".join(f"- {t}" for t in assessment.get("triggers", [])) + "\n</rule_based_triggers>\n\n"
         f"<sources>\n{source_text or '(no sources retrieved)'}\n</sources>\n\n"
-        "Write the brief by calling submit_case_brief."
+        "Return the brief as one JSON object that follows the schema."
     )
     raw = _call_tool(BRIEF_SYSTEM, user, BRIEF_TOOL, max_tokens=4500)
     brief, stats = _validate_brief(raw, set(registry))
@@ -374,8 +359,8 @@ def analyze(case_input: dict, custody_days: int, assessment: dict, top_k: int = 
               "retrieval_mode": index.mode, "categories": sorted(categories), "acts": sorted(acts),
               "brief": None, "brief_status": "ok", "disclaimer": DISCLAIMER}
     if not llm_available():
-        result["brief_status"] = "no_api_key"
-        result["brief_message"] = "Set ANTHROPIC_API_KEY on the server to enable the written brief. Similar judgments and rule-based triggers are shown below."
+        result["brief_status"] = "llm_unavailable"
+        result["brief_message"] = "Start Ollama and download the model (see README) to enable the written brief. Similar judgments and rule-based triggers are shown below."
         return result
     try:
         ref = reference_sources(case_input.get("sections", ""), case_input.get("special_laws", ""),

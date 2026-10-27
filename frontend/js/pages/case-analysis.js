@@ -170,7 +170,7 @@ export function render() {
 
             ${analysisError ? alert(`Automated review could not be completed: ${escapeHtml(analysisError)}. The information below is what you submitted; no similar judgments or automated review result is available.`, 'warning', 'Review service unavailable') : ''}
 
-            ${!brief && briefMessage ? alert(escapeHtml(briefMessage), briefStatus === 'no_api_key' ? 'info' : 'warning', 'Written brief not available') : ''}
+            ${!brief && briefMessage ? alert(escapeHtml(briefMessage), briefStatus === 'llm_unavailable' ? 'info' : 'warning', 'Written brief not available') : ''}
 
             <!-- Summary Stats -->
             <div class="grid-cols-5" style="margin-bottom: var(--space-6)">

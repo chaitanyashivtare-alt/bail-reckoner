@@ -3,8 +3,9 @@
     pip install pytest httpx
     python -m pytest test_rag.py -q
 
-Claude is replaced by a fake client, so these tests check OUR logic (retrieval, masking, citation
-checks, guardrails, fallbacks, lawyer matching, API wiring), not the quality of Claude's writing.
+The local model (Ollama) is replaced by a fake, so these tests check OUR logic (retrieval, masking,
+citation checks, guardrails, fallbacks, lawyer matching, API wiring), not the quality of the model's writing.
+The HTTP client itself is tested in test_llm.py.
 """
 import os
 import shutil
@@ -22,24 +23,23 @@ sys.path.insert(0, str(ROOT))
 _TMP = tempfile.mkdtemp()
 shutil.copy(ROOT / "bail_reckoner.db", Path(_TMP) / "test.db")
 os.environ["DATABASE_URL"] = f"sqlite:///{Path(_TMP) / 'test.db'}"
-os.environ.pop("ANTHROPIC_API_KEY", None)
+# Nothing listens on this port, so the local model counts as unavailable in these tests.
+os.environ["OLLAMA_URL"] = "http://127.0.0.1:9"
 os.environ["RAG_DISABLE_DENSE"] = "1"
 
 from services import lawyer_match, rag, rag_retrieval  # noqa: E402
 
 
-# ---------------------------------------------------------------- fake Claude
-class FakeClient:
-    """Mimics anthropic.Anthropic().messages.create for forced tool use."""
+# ---------------------------------------------------------------- fake local model
+class FakeLLM:
+    """Stands in for services.llm: records each call and returns a fixed structured answer."""
 
     def __init__(self, payload):
         self.payload, self.calls = payload, []
-        self.messages = SimpleNamespace(create=self._create)
 
-    def _create(self, **kwargs):
-        self.calls.append(kwargs)
-        block = SimpleNamespace(type="tool_use", input=self.payload)
-        return SimpleNamespace(content=[block])
+    def __call__(self, system, user, tool, max_tokens):
+        self.calls.append({"system": system, "user": user, "tool": tool, "max_tokens": max_tokens})
+        return dict(self.payload)
 
 
 @pytest.fixture(autouse=True)
@@ -117,7 +117,7 @@ def test_brief_validation_drops_predictions_and_flags_bad_citations():
         "procedural_options": [{"option": "Raise Section 50 compliance", "basis": "Search was recorded.", "citations": ["C1"]}],
         "questions_for_lawyer": [{"question": "Was the FSL report filed in time?", "reason": "Pending per chargesheet."}],
     }
-    fake = FakeClient(payload)
+    fake = FakeLLM(payload)
     rag.set_client_for_tests(fake)
     similar = rag_retrieval.get_index().search("ganja intermediate quantity", special_laws_text="NDPS", top_k=3)
     brief = rag.generate_brief(_case_input(), 79, {"triggers": []}, similar, rag.reference_sources("", "NDPS 20", "Regular", True, {"Narcotics"}))
@@ -127,10 +127,10 @@ def test_brief_validation_drops_predictions_and_flags_bad_citations():
     assert brief["applicable_provisions"][0]["citations"] == ["C1"]
     assert len(brief["how_similar_cases_ended"]) == 1 and brief["how_similar_cases_ended"][0]["uncited"]
     # personal data never reached the model
-    sent = fake.calls[0]["messages"][0]["content"]
+    sent = fake.calls[0]["user"]
     assert "9876543210" not in sent and "[PHONE]" in sent
-    # model was forced to use the structured tool
-    assert fake.calls[0]["tool_choice"] == {"type": "tool", "name": "submit_case_brief"}
+    # the model was asked for the structured brief
+    assert fake.calls[0]["tool"]["name"] == "submit_case_brief"
 
 
 def test_sources_include_statute_rules_and_landmarks():
@@ -139,26 +139,26 @@ def test_sources_include_statute_rules_and_landmarks():
     assert any("Murder" in (o.get("offense_name") or "") for o in ref["offenses"])
 
 
-def test_analyze_without_api_key_still_returns_retrieval():
+def test_analyze_without_local_model_still_returns_retrieval():
     out = rag.analyze(_case_input(), 79, {"triggers": []})
-    assert out["brief"] is None and out["brief_status"] == "no_api_key"
+    assert out["brief"] is None and out["brief_status"] == "llm_unavailable"
     assert out["similar_cases"] and out["outcome_summary"]["retrieved"] == len(out["similar_cases"])
 
 
 def test_analyze_survives_llm_failure():
-    class Boom:
-        messages = SimpleNamespace(create=lambda **k: (_ for _ in ()).throw(RuntimeError("down")))
-    rag.set_client_for_tests(Boom())
+    def boom(system, user, tool, max_tokens):
+        raise RuntimeError("down")
+    rag.set_client_for_tests(boom)
     out = rag.analyze(_case_input(), 79, {"triggers": []})
     assert out["brief_status"] == "error" and out["similar_cases"]
 
 
 def test_extract_fields_masks_text_before_sending():
-    fake = FakeClient({"sections": "", "special_laws": "NDPS 20(b)(ii)(B)", "bail_type": "Regular",
+    fake = FakeLLM({"sections": "", "special_laws": "NDPS 20(b)(ii)(B)", "bail_type": "Regular",
                        "case_summary": "x", "legal_issues": "y", "retrieval_query": "z"})
     rag.set_client_for_tests(fake)
     data = rag.extract_fields("Name: Vikram Joshi\nPhone 9876543210\nGanja recovered.", redact_terms=["Joshi"])
-    sent = fake.calls[0]["messages"][0]["content"]
+    sent = fake.calls[0]["user"]
     assert "Vikram Joshi" not in sent and "9876543210" not in sent and "Joshi" not in sent
     assert data["special_laws"].startswith("NDPS") and data["privacy"]["masked"]
 
@@ -185,11 +185,11 @@ def client():
     return TestClient(app)
 
 
-def test_api_analyze_with_fake_claude(client):
+def test_api_analyze_with_fake_local_model(client):
     payload = {"summary": "S.", "applicable_provisions": [{"provision": "NDPS", "explanation": "e", "citations": ["C1"]}],
                "how_similar_cases_ended": [{"pattern": "In C1 the court looked at quantity.", "citations": ["C1"]}],
                "procedural_options": [], "questions_for_lawyer": [{"question": "q?", "reason": "r"}]}
-    rag.set_client_for_tests(FakeClient(payload))
+    rag.set_client_for_tests(FakeLLM(payload))
     r = client.post("/api/rag/analyze", json={"special_laws": "NDPS 20(b)(ii)(B)", "bail_type": "Regular", "arrest_date": "2026-08-10",
                                               "case_facts": "8.5 kg ganja recovered", "region": "Maharashtra", "court": "Special Court Pune"})
     body = r.json()
@@ -198,9 +198,9 @@ def test_api_analyze_with_fake_claude(client):
     assert body["lawyers"] and body["assessment"]["status"] == "Review required" and body["custody_days"] > 0
 
 
-def test_api_without_key_degrades_gracefully(client):
+def test_api_without_local_model_degrades_gracefully(client):
     r = client.post("/api/rag/analyze", json={"sections": "302", "case_facts": "murder case"})
-    assert r.status_code == 200 and r.json()["brief_status"] == "no_api_key" and r.json()["similar_cases"]
+    assert r.status_code == 200 and r.json()["brief_status"] == "llm_unavailable" and r.json()["similar_cases"]
     assert client.post("/api/rag/extract-fields", json={"text": "abc"}).status_code == 503
     assert client.post("/api/rag/analyze", json={}).status_code == 400
 

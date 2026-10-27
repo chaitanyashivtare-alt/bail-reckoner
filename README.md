@@ -188,20 +188,20 @@ The optional `evaluate.py` experiment uses stratified train/validation/test spli
 
 ## RAG research brief (new)
 
-Upload a text-based chargesheet PDF on **Analyze Your Case**. Optionally press **Auto-fill** to have Claude read the text and fill the form (you review every field), then **Analyze**. The result page now shows:
+Upload a text-based chargesheet PDF on **Analyze Your Case**. Optionally press **Auto-fill** to have the local AI model read the text and fill the form (you review every field), then **Analyze**. The result page now shows:
 
 - a **cited research brief**: applicable provisions, how similar judgments were decided and why, procedural issues to discuss with a lawyer, case-specific questions, and what the document does not state. Every point carries source chips (`C1`, `S1`, `R1`, `L1`, `K1`) that open the exact passage, statute-table row, custody rule, landmark judgment or checklist item it came from;
 - the retrieved judgments with a plain-language reason for each match ("shares section 302", "same Act: NDPS");
 - **suggested lawyers** with the reasons for each suggestion.
 
 ```
-chargesheet PDF -> text -> (optional) Claude field extraction -> form
-form -> hybrid retrieval -> numbered sources -> Claude (forced structured output) -> validation -> page
+chargesheet PDF -> text -> (optional) local-model field extraction -> form
+form -> hybrid retrieval -> numbered sources -> local model (JSON schema output via Ollama) -> validation -> page
 ```
 
 **Retrieval** (`services/rag_retrieval.py`): judgments are split into field-level chunks (facts, legal issues, reasoning, summary). BM25 ranks chunks by exact words and section numbers; an optional dense index adds embeddings (`python ml/build_rag_index.py`); results are fused with Reciprocal Rank Fusion and rolled up to cases with explainable boosts for shared sections (IPC and BNS numbering are mapped through the `offenses` table), shared Acts (NDPS, POCSO, UAPA, PMLA, ...) and crime category. Statutes are detected from the judgment text because the `special_laws` column is almost always empty.
 
-**Generation** (`services/rag.py`): Claude may only use the numbered sources it is given. The server then validates the output: unknown citations are removed, items left without a source are tagged "No source: verify", and any sentence that predicts or recommends a bail outcome is dropped. Outcome counts are computed by the server, not the model.
+**Generation** (`services/rag.py`, model access in `services/llm.py`): the local model may only use the numbered sources it is given. The server then validates the output: unknown citations are removed, items left without a source are tagged "No source: verify", and any sentence that predicts or recommends a bail outcome is dropped. Outcome counts are computed by the server, not the model.
 
 **Privacy**: phone numbers, ID numbers, e-mail and labelled name/address lines are masked before text leaves the server, and the user can list names to hide. Names written inside sentences cannot be found automatically; this is best-effort, so do not use real client data without a data-processing agreement.
 
@@ -209,9 +209,11 @@ form -> hybrid retrieval -> numbered sources -> Claude (forced structured output
 
 ```powershell
 python -m pip install -r requirements.txt -r requirements-web.txt
-copy .env.example .env      # then set ANTHROPIC_API_KEY
+# 1. Install Ollama from https://ollama.com and start it
+ollama pull qwen2.5:7b-instruct      # one-time download (about 4.7 GB)
+copy .env.example .env               # OLLAMA_MODEL can be changed here
 python run_web.py
-python -m pytest test_rag.py -q       # offline tests, no API key needed
+python -m pytest test_rag.py -q       # offline tests, Ollama not needed
 python ml\eval_retrieval.py           # retrieval comparison
 # optional: python ml\build_rag_index.py   (downloads a sentence-transformer model)
 ```

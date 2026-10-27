@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from engine import custody_days, search_cases, rule_assessment, database_stats
 from services import rag as rag_service
+from services import llm
 from services import lawyer_match
 
 DB_PATH = ROOT / "bail_reckoner.db"
@@ -263,7 +264,7 @@ async def review_case(req: CaseReviewRequest):
 
 
 # ---- RAG: extraction, cited brief, lawyer suggestions ----------------------
-# These routes can spend Anthropic API credit, so they are rate-limited per client.
+# These routes run a local model, which is slow on a CPU, so they are rate-limited per client.
 
 import os as _os
 import time as _time
@@ -288,7 +289,8 @@ def _rag_rate_limit(request: Request) -> None:
 async def rag_status():
     from services import rag_retrieval
     return {"llm_configured": rag_service.llm_available(),
-            "model": _os.getenv("ANTHROPIC_MODEL", rag_service.DEFAULT_MODEL),
+            "llm": llm.status(),
+            "model": llm.model_name(),
             "retrieval_mode": rag_retrieval.get_index().mode}
 
 
@@ -298,7 +300,7 @@ async def rag_extract_fields(req: RagExtractRequest, request: Request):
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="No text to read.")
     if not rag_service.llm_available():
-        raise HTTPException(status_code=503, detail="AI field extraction is not configured (ANTHROPIC_API_KEY missing).")
+        raise HTTPException(status_code=503, detail="AI field extraction needs the local model. Start Ollama and download it (see README).")
     _rag_rate_limit(request)
     try:
         return rag_service.extract_fields(req.text, req.redact_terms)
