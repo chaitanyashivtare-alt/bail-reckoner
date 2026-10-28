@@ -139,10 +139,39 @@ def test_sources_include_statute_rules_and_landmarks():
     assert any("Murder" in (o.get("offense_name") or "") for o in ref["offenses"])
 
 
-def test_analyze_without_local_model_still_returns_retrieval():
+def test_analyze_without_any_model_builds_extractive_brief():
     out = rag.analyze(_case_input(), 79, {"triggers": []})
-    assert out["brief"] is None and out["brief_status"] == "llm_unavailable"
+    assert out["brief_status"] == "extractive" and out["brief"]["mode"] == "extractive"
     assert out["similar_cases"] and out["outcome_summary"]["retrieved"] == len(out["similar_cases"])
+    assert "No AI model is configured" in out["brief_message"]
+
+
+def test_extractive_brief_is_fully_cited_and_has_no_outcome_language():
+    """No model is involved, so every citation must exist and the wording must stay neutral."""
+    case = {**_case_input(), "sections": "302", "special_laws": "NDPS 20", "bail_type": "Regular", "arrest_date": "2026-05-01"}
+    out = rag.analyze(case, 150, {"triggers": []})
+    b = out["brief"]
+    valid = set(b["sources"])
+    assert b["applicable_provisions"] and b["how_similar_cases_ended"] and b["procedural_options"] and b["questions_for_lawyer"]
+    for key in ("applicable_provisions", "how_similar_cases_ended", "procedural_options"):
+        for item in b[key]:
+            assert set(item["citations"]) <= valid, item
+            if key != "procedural_options":
+                assert item["citations"] and not item.get("uncited"), item
+    blob = " ".join(str(x) for k in ("summary", "applicable_provisions", "how_similar_cases_ended", "procedural_options", "questions_for_lawyer") for x in [b[k]])
+    assert not rag._PREDICTION_RE.search(blob)
+    assert b["checks"]["dropped_prediction"] == 0 and b["checks"]["invalid_citations_removed"] == 0
+    assert any(o["option"].startswith("Check whether this custody rule applies") for o in b["procedural_options"])
+
+
+def test_extractive_brief_default_bail_and_custody_arithmetic():
+    case = {**_case_input(), "sections": "302", "special_laws": "", "bail_type": "Default/statutory",
+            "charge_sheet_filed": False, "arrest_date": "2026-01-01"}
+    b = rag.analyze(case, 300, {"triggers": []})["brief"]
+    assert any("charge sheet" in o["option"].lower() for o in b["procedural_options"])
+    assert any("charge sheet" in q["question"].lower() for q in b["questions_for_lawyer"])
+    # IPC 302: no fixed maximum term, so the half-sentence rule must not be turned into a number.
+    assert not any("about " in o["basis"] and "days;" in o["basis"] for o in b["procedural_options"] if "custody rule" in o["option"])
 
 
 def test_analyze_survives_llm_failure():
@@ -150,7 +179,9 @@ def test_analyze_survives_llm_failure():
         raise RuntimeError("down")
     rag.set_client_for_tests(boom)
     out = rag.analyze(_case_input(), 79, {"triggers": []})
-    assert out["brief_status"] == "error" and out["similar_cases"]
+    # The model failing must not leave the page empty: the rule-based brief takes over and says why.
+    assert out["brief_status"] == "extractive" and out["similar_cases"] and out["brief"]["mode"] == "extractive"
+    assert "could not be used" in out["brief_message"]
 
 
 def test_extract_fields_masks_text_before_sending():
@@ -170,6 +201,15 @@ def test_lawyer_match_explains_itself_and_prefers_relevant_specialist():
     assert any("NDPS" in r for r in top[0]["matchReasons"])
     assert any("Maharashtra" in r for r in top[0]["matchReasons"])
     assert all(l["sample"] for l in top)
+
+
+def test_generic_court_words_do_not_count_as_a_court_match():
+    """'Special Court (NDPS), Pune' used to match every lawyer because of the word 'court'."""
+    top = lawyer_match.match(acts=["NDPS"], categories=["Narcotics"], court="Special Court (NDPS), Pune", region="Maharashtra")
+    assert top[0]["id"] == 5                                   # Pune-based NDPS lawyer beats the Mumbai one
+    reasons = {l["id"]: l["matchReasons"] for l in top}
+    assert any("court named" in r for r in reasons[5]) and not any("court named" in r for r in reasons[2])
+    assert not any("court named" in r for l in lawyer_match.match(court="Special Court", top_k=12) for r in l["matchReasons"])
 
 
 def test_lawyer_match_pocso_and_filters():
@@ -200,7 +240,7 @@ def test_api_analyze_with_fake_local_model(client):
 
 def test_api_without_local_model_degrades_gracefully(client):
     r = client.post("/api/rag/analyze", json={"sections": "302", "case_facts": "murder case"})
-    assert r.status_code == 200 and r.json()["brief_status"] == "llm_unavailable" and r.json()["similar_cases"]
+    assert r.status_code == 200 and r.json()["brief_status"] == "extractive" and r.json()["similar_cases"] and r.json()["brief"]["sources"]
     assert client.post("/api/rag/extract-fields", json={"text": "abc"}).status_code == 503
     assert client.post("/api/rag/analyze", json={}).status_code == 400
 

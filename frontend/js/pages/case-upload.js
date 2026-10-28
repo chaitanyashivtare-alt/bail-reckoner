@@ -97,6 +97,16 @@ export function render() {
                             <label class="form-label">Case Facts and Legal Issues</label>
                             <textarea class="form-textarea" id="inp-facts" rows="6" placeholder="Enter relevant facts, or upload a text-based PDF above to extract its text. Review and remove anything you do not want to submit."></textarea>
                         </div>
+                        <div class="form-row" style="margin-top: var(--space-4)">
+                            <div class="form-group">
+                                <label class="form-label">Court (optional, helps match lawyers)</label>
+                                <input type="text" class="form-input" id="inp-court" placeholder="e.g., Special Court (NDPS), Pune">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">State (optional)</label>
+                                <input type="text" class="form-input" id="inp-region" placeholder="e.g., Maharashtra">
+                            </div>
+                        </div>
                         <div class="form-group" style="margin-top: var(--space-4)">
                             <label class="form-label">Names or places to hide from the AI (optional, comma-separated)</label>
                             <input type="text" class="form-input" id="inp-redact" placeholder="e.g., Vikram Joshi, Neha Joshi, Wanowrie">
@@ -167,6 +177,8 @@ async function autofill() {
         check('inp-witness', d.witness_risk);
         check('inp-evidence', d.evidence_risk);
         extracted = { retrieval_query: d.retrieval_query || '', court: d.court || '', region: d.region || '' };
+        if (d.court) set('inp-court', d.court);
+        if (d.region) set('inp-region', d.region);
         const gaps = (d.missing_information || []).length ? ` Not stated in the document: ${d.missing_information.slice(0, 3).join('; ')}.` : '';
         showToast('Form filled from your document. Check every field before analysing.' + gaps, 'success');
     } catch (error) {
@@ -275,8 +287,8 @@ async function runAnalysis() {
         top_k: 5,
         redact_terms: redactTerms(),
         retrieval_query: extracted.retrieval_query,
-        court: extracted.court,
-        region: extracted.region,
+        court: document.getElementById('inp-court')?.value.trim() || extracted.court,
+        region: document.getElementById('inp-region')?.value.trim() || extracted.region,
     };
     let finished = false;
     const request = api.ragAnalyze(payload).catch(async err => {
@@ -305,7 +317,7 @@ async function runAnalysis() {
 
         setCurrentCase({
             ...result,
-            input: { sections, specialLaws, bailType, arrestDate, chargeSheet, firstTime, flight, witness, evidence, facts, court: extracted.court, region: extracted.region },
+            input: { sections, specialLaws, bailType, arrestDate, chargeSheet, firstTime, flight, witness, evidence, facts, court: payload.court, region: payload.region },
         });
 
         draw(analysisSteps.length);

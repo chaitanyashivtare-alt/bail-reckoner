@@ -195,13 +195,20 @@ Upload a text-based chargesheet PDF on **Analyze Your Case**. Optionally press *
 - **suggested lawyers** with the reasons for each suggestion.
 
 ```
-chargesheet PDF -> text -> (optional) local-model field extraction -> form
-form -> hybrid retrieval -> numbered sources -> local model (JSON schema output via Ollama) -> validation -> page
+chargesheet PDF -> text -> (optional) model field extraction -> form
+form -> hybrid retrieval -> numbered sources -> model writes brief (JSON) -> validation -> page
+                                              \-> no model available: rule-based brief from the same sources
 ```
 
 **Retrieval** (`services/rag_retrieval.py`): judgments are split into field-level chunks (facts, legal issues, reasoning, summary). BM25 ranks chunks by exact words and section numbers; an optional dense index adds embeddings (`python ml/build_rag_index.py`); results are fused with Reciprocal Rank Fusion and rolled up to cases with explainable boosts for shared sections (IPC and BNS numbering are mapped through the `offenses` table), shared Acts (NDPS, POCSO, UAPA, PMLA, ...) and crime category. Statutes are detected from the judgment text because the `special_laws` column is almost always empty.
 
-**Generation** (`services/rag.py`, model access in `services/llm.py`): the local model may only use the numbered sources it is given. The server then validates the output: unknown citations are removed, items left without a source are tagged "No source: verify", and any sentence that predicts or recommends a bail outcome is dropped. Outcome counts are computed by the server, not the model.
+**Generation** (`services/rag.py`, model access in `services/llm.py`): the model may only use the numbered sources it is given. The server then validates the output: unknown citations are removed, items left without a source are tagged "No source: verify", and any sentence that predicts or recommends a bail outcome is dropped. Outcome counts are computed by the server, not the model.
+
+**Three ways to run the brief, all free** (`services/llm.py`, chosen in `.env`):
+
+1. **No model at all.** The brief is assembled from the retrieved sources with fixed rules (statute-table rows, the courts' own reasoning text, custody-threshold arithmetic, checklist items, fact-driven questions). Every citation is valid by construction, and the page says no AI wrote it. This is also the automatic fallback if a model fails or is rate-limited.
+2. **Free hosted model** (quickest): set `LLM_API_KEY` from Google AI Studio (Gemini) or Groq; see `.env.example`. Any OpenAI-compatible service works. Submitted text is sent to that service after masking.
+3. **Local model with Ollama**: nothing leaves your machine, but it needs a large download and a capable laptop.
 
 **Privacy**: phone numbers, ID numbers, e-mail and labelled name/address lines are masked before text leaves the server, and the user can list names to hide. Names written inside sentences cannot be found automatically; this is best-effort, so do not use real client data without a data-processing agreement.
 
@@ -209,11 +216,10 @@ form -> hybrid retrieval -> numbered sources -> local model (JSON schema output 
 
 ```powershell
 python -m pip install -r requirements.txt -r requirements-web.txt
-# 1. Install Ollama from https://ollama.com and start it
-ollama pull qwen2.5:7b-instruct      # one-time download (about 4.7 GB)
-copy .env.example .env               # OLLAMA_MODEL can be changed here
+copy .env.example .env               # then optionally set LLM_API_KEY (free Gemini/Groq key); works without it
 python run_web.py
-python -m pytest test_rag.py -q       # offline tests, Ollama not needed
+# Ollama is optional: install from https://ollama.com, then  ollama pull qwen2.5:7b-instruct
+python -m pytest test_rag.py test_llm.py test_llm_hosted.py -q   # offline tests, no key or model needed
 python ml\eval_retrieval.py           # retrieval comparison
 # optional: python ml\build_rag_index.py   (downloads a sentence-transformer model)
 ```

@@ -7,7 +7,11 @@ by Bar Council advertising rules. Every suggestion lists the reasons it was made
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+
+_COURT_STOPWORDS = {"court", "courts", "special", "sessions", "session", "high", "district", "judicial", "magistrate", "first", "class",
+                    "chief", "bench", "judge", "the", "and", "of", "for", "city", "civil", "supreme", "metropolitan", "principal"}
 
 LAWYERS_FILE = Path(__file__).resolve().parent.parent / "data" / "lawyers.json"
 
@@ -41,6 +45,8 @@ def match(acts=(), categories=(), court: str = "", region: str = "", languages=(
           min_experience: int = 0, availability: str = "", top_k: int = 5) -> list[dict]:
     wanted = case_specializations(acts, categories)
     court_l, region_l = (court or "").lower(), (region or "").lower()
+    # Only distinctive words (place names, "NDPS", "POCSO"...) count; "court", "special", "high" appear everywhere.
+    court_words = [w for w in re.findall(r"[a-z]{3,}", court_l) if w not in _COURT_STOPWORDS]
     langs = {x.lower() for x in languages or [] if x and x.lower() != "any"}
     out = []
     for l in load_lawyers():
@@ -62,7 +68,7 @@ def match(acts=(), categories=(), court: str = "", region: str = "", languages=(
         elif region_l and region_l in l["location"].lower():
             score += 20
             reasons.append(f"Based in {l['location']}")
-        if court_l and any(w in c.lower() for c in l["courts"] for w in court_l.replace(",", " ").split() if len(w) > 4):
+        if court_words and any(w in c.lower() for c in l["courts"] for w in court_words):
             score += 10
             reasons.append("Appears in a court named in your case")
         if langs and langs & {x.lower() for x in l["languages"]}:

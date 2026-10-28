@@ -54,8 +54,39 @@ class _FakeOllama(BaseHTTPRequestHandler):
 _server = HTTPServer(("127.0.0.1", 0), _FakeOllama)
 threading.Thread(target=_server.serve_forever, daemon=True).start()
 FAKE_URL = f"http://127.0.0.1:{_server.server_address[1]}"
-os.environ["OLLAMA_URL"] = FAKE_URL
-os.environ["OLLAMA_MODEL"] = "qwen2.5:7b-instruct"
+_SAVED = {}
+
+
+def _enter_env():
+    """Point the client at the fake server (undone afterwards so other test files are not affected)."""
+    for key, value in (("OLLAMA_URL", FAKE_URL), ("OLLAMA_MODEL", "qwen2.5:7b-instruct"), ("LLM_API_KEY", None), ("LLM_PROVIDER", "ollama")):
+        _SAVED[key] = os.environ.get(key)
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    llm._status_cache.update(at=0.0, info=None)
+
+
+def _exit_env():
+    for key, value in _SAVED.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    llm._status_cache.update(at=0.0, info=None)
+
+
+try:
+    import pytest
+
+    @pytest.fixture(autouse=True, scope="module")
+    def _fake_ollama_env():
+        _enter_env()
+        yield
+        _exit_env()
+except ImportError:  # running without pytest
+    pass
 
 
 def _reset_status_cache():
@@ -103,6 +134,7 @@ def test_call_structured_sends_schema_and_returns_object():
     assert body["messages"][0]["role"] == "system" and "JSON schema" in body["messages"][0]["content"]
     assert body["messages"][1] == {"role": "user", "content": "hello"}
     assert body["options"]["num_predict"] == 100
+    assert body["options"]["num_ctx"] >= 8192             # whole prompt must fit in the context window
 
 
 def test_non_json_output_raises_llm_error():
@@ -141,6 +173,7 @@ def test_unreachable_server_raises_llm_error_and_status_is_down():
 
 
 if __name__ == "__main__":
+    _enter_env()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for test in tests:
         test()

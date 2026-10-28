@@ -290,7 +290,7 @@ async def rag_status():
     from services import rag_retrieval
     return {"llm_configured": rag_service.llm_available(),
             "llm": llm.status(),
-            "model": llm.model_name(),
+            "model": llm.active_model(),
             "retrieval_mode": rag_retrieval.get_index().mode}
 
 
@@ -300,7 +300,7 @@ async def rag_extract_fields(req: RagExtractRequest, request: Request):
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="No text to read.")
     if not rag_service.llm_available():
-        raise HTTPException(status_code=503, detail="AI field extraction needs the local model. Start Ollama and download it (see README).")
+        raise HTTPException(status_code=503, detail="AI auto-fill needs a model: set LLM_API_KEY (free Gemini or Groq key) in .env, or start Ollama. You can fill the form by hand.")
     _rag_rate_limit(request)
     try:
         return rag_service.extract_fields(req.text, req.redact_terms)

@@ -31,7 +31,7 @@ function renderBrief(brief, outcome) {
     <div class="section">
         <div class="section-header">
             <h3 class="section-title">Research Brief</h3>
-            ${aiBadge()}
+            ${brief.mode === 'extractive' ? badge('Rule-based · no AI writer', 'neutral') : aiBadge()}
         </div>
         <div class="card brief-card">
             <p class="brief-summary">${escapeHtml(brief.summary || '')}</p>
@@ -51,7 +51,7 @@ function renderBrief(brief, outcome) {
 
             ${(brief.missing_information || []).length ? `<h4>Not stated in your documents</h4>${list(brief.missing_information, m => `<li>${escapeHtml(m)}</li>`)}` : ''}
 
-            <p class="brief-foot">Written by an AI model using only the numbered sources below. ${flagged ? `${flagged} item(s) were removed or marked for missing a valid source. ` : ''}Not legal advice; it does not predict or recommend a bail outcome.</p>
+            <p class="brief-foot">${brief.mode === 'extractive' ? 'Assembled automatically from the numbered sources below using fixed rules; no AI model wrote this text. ' : 'Written by an AI model using only the numbered sources below. '}${flagged ? `${flagged} item(s) were removed or marked for missing a valid source. ` : ''}Not legal advice; it does not predict or recommend a bail outcome.</p>
         </div>
     </div>`;
 }
@@ -104,7 +104,7 @@ function renderLawyers(lawyers) {
 
 function briefToText(brief) {
     if (!brief) return [];
-    const L = ['', 'RESEARCH BRIEF (AI-written from the cited sources; verify before relying on it)', brief.summary || ''];
+    const L = ['', (brief.mode === 'extractive' ? 'RESEARCH BRIEF (assembled from the cited sources by fixed rules; verify before relying on it)' : 'RESEARCH BRIEF (AI-written from the cited sources; verify before relying on it)'), brief.summary || ''];
     const block = (title, items, fn) => { if (items && items.length) { L.push('', title.toUpperCase()); items.forEach((x, i) => L.push(`${i + 1}. ${fn(x)}`)); } };
     const c = x => (x.citations && x.citations.length ? ` [${x.citations.join(', ')}]` : x.uncited ? ' [no source: verify]' : '');
     block('Applicable provisions', brief.applicable_provisions, p => `${p.provision}: ${p.explanation}${c(p)}`);
@@ -170,7 +170,7 @@ export function render() {
 
             ${analysisError ? alert(`Automated review could not be completed: ${escapeHtml(analysisError)}. The information below is what you submitted; no similar judgments or automated review result is available.`, 'warning', 'Review service unavailable') : ''}
 
-            ${!brief && briefMessage ? alert(escapeHtml(briefMessage), briefStatus === 'llm_unavailable' ? 'info' : 'warning', 'Written brief not available') : ''}
+            ${briefMessage ? alert(escapeHtml(briefMessage), brief ? 'info' : 'warning', brief ? 'Brief assembled from retrieved sources' : 'Written brief not available') : ''}
 
             <!-- Summary Stats -->
             <div class="grid-cols-5" style="margin-bottom: var(--space-6)">

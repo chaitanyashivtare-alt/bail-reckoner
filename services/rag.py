@@ -334,6 +334,133 @@ def generate_brief(case_input: dict, custody_days: int, assessment: dict, simila
     return brief
 
 
+# ----------------------------------------------------------------------------
+# No-AI fallback: assemble the same cited brief from the retrieved sources with fixed rules
+# ----------------------------------------------------------------------------
+
+def _trim(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    end = max(cut.rfind(". "), cut.rfind("; "))
+    return (cut[:end + 1] if end > limit * 0.5 else cut.rstrip() + "…")
+
+
+def extractive_brief(case_input: dict, custody_days: int, assessment: dict, similar: list[dict], ref: dict) -> dict:
+    """A brief with no language model. Wording is fixed by rules; facts come from the sources.
+    Every citation points at a source that exists, so nothing here can be invented."""
+    registry, _ = build_sources(similar, ref)
+    index = rag_retrieval.get_index()
+    rows = {c["case_id"]: c for c in index.cases}
+    n = max([int(k[1:]) for k in registry if k.startswith("C")] or [0])
+    case_ids = {}   # case_id -> (reasoning source id, other excerpt ids)
+    for case in similar[:4]:
+        row = rows.get(case["case_id"], {})
+        text = row.get("judgment_reason") or row.get("summary") or ""
+        others = [sid for sid, rec in registry.items() if rec.get("case_id") == case["case_id"]]
+        rid = None
+        if text:
+            n += 1
+            rid = f"C{n}"
+            registry[rid] = {"id": rid, "kind": "judgment", "title": case["case_title"], "court": case["court"],
+                             "year": case.get("year") or case["date"], "outcome": case["bail_outcome"],
+                             "bail_type": case["bail_type"], "field": "judgment_reason", "excerpt": text, "case_id": case["case_id"]}
+        case_ids[case["case_id"]] = (rid, others)
+
+    secs = (case_input.get("sections") or "").strip()
+    spec = (case_input.get("special_laws") or "").strip()
+    filed = bool(case_input.get("charge_sheet_filed"))
+    entered = "; ".join(x for x in (secs and f"IPC/BNS {secs}", spec) if x) or "no sections entered"
+    summary = (f"Details entered: {entered}. Bail type: {case_input.get('bail_type') or 'not stated'}. "
+               + (f"{custody_days} days in custody as of today. " if case_input.get("arrest_date") else "No arrest date entered. ")
+               + ("Charge sheet reported as filed. " if filed else "Charge sheet not confirmed. ")
+               + f"{len(similar)} similar judgments were retrieved by wording, section and statute.")
+
+    provisions, missing = [], []
+    offenses = ref.get("offenses", [])
+    for i, r in enumerate(offenses[:4], 1):
+        sect = f"IPC {r.get('ipc_section')} / BNS {r.get('bns_section')}" if r.get("bns_section") else f"{r.get('act', 'Special Act')} s.{r.get('ipc_section')}"
+        bits = [r.get("offense_name") or "", r.get("bailable") or "", r.get("cognizable") or ""]
+        if r.get("max_punishment_years"):
+            bits.append(f"maximum punishment {r['max_punishment_years']:g} years")
+        if r.get("death_or_life"):
+            bits.append("death or life imprisonment possible")
+        if r.get("triable_by"):
+            bits.append(f"triable by {r['triable_by']}")
+        provisions.append({"provision": sect, "explanation": "; ".join(b for b in bits if b) + ".", "citations": [f"S{i}"]})
+    if not offenses:
+        missing.append("The sections entered did not match any row in the built-in statute table; read the provision text itself.")
+
+    similar_items = []
+    for case in similar[:4]:
+        rid, others = case_ids[case["case_id"]]
+        row = rows.get(case["case_id"], {})
+        reason = _trim(row.get("judgment_reason") or row.get("summary") or "", 380)
+        why = ", ".join(case.get("match_reasons") or [])
+        cites = ([rid] if rid else []) + [o for o in others if o != rid][:1]
+        similar_items.append({"pattern": f"{case['case_title']} ({case['court']}, {case.get('year') or case['date']}): bail {case['bail_outcome'].lower()}. "
+                                         f"Court's reasoning in that case: {reason} Retrieved because: {why}.", "citations": cites})
+
+    options = []
+    primary = next((r for r in offenses if r.get("max_punishment_years") and not r.get("death_or_life")), None)
+    for i, rule in enumerate(ref.get("rules", []), 1):
+        frac = rule.get("threshold_fraction")
+        if frac and primary:
+            days = frac * float(primary["max_punishment_years"]) * 365
+            state = "has been reached" if custody_days >= days else "has not yet been reached"
+            basis = (f"{rule['source_provision']}. For {primary.get('offense_name')} the stated maximum is {primary['max_punishment_years']:g} years, "
+                     f"so this threshold is about {int(days)} days; {custody_days} days have been served, so it {state}. "
+                     f"Exclusions to verify: {_trim(rule.get('exclusion_notes') or 'none listed', 200)}")
+        else:
+            basis = f"{rule['source_provision']}: {_trim(rule['description'], 260)}"
+        options.append({"option": f"Check whether this custody rule applies: {rule['rule_name']}", "basis": basis, "citations": [f"R{i}"]})
+    bt = (case_input.get("bail_type") or "").lower()
+    if bt.startswith("default") or (not filed and custody_days >= 60):
+        options.append({"option": "Confirm whether the period for filing the charge sheet has run out",
+                        "basis": f"No charge sheet is confirmed and {custody_days} days have passed since arrest. The 60/90/180-day periods are not in the built-in sources, so check them against the statute.",
+                        "citations": []})
+    for i, r in enumerate(ref.get("landmarks", [])[:3], 1):
+        options.append({"option": f"Consider the principle in {r['case_name']} {r['citation']}", "basis": _trim(r["principle_summary"], 300), "citations": [f"L{i}"]})
+    checklist = ref.get("checklist", [])
+    if checklist:
+        options.append({"option": f"Prepare the standard documents for a {case_input.get('bail_type') or 'regular'} bail application",
+                        "basis": "; ".join(_trim(c["requirement"], 80) for c in checklist[:5]),
+                        "citations": [f"K{i}" for i in range(1, min(len(checklist), 5) + 1)]})
+
+    qs = []
+    qs.append(("Is continued custody still necessary now that the charge sheet is filed?", "The details entered say the charge sheet has been filed.") if filed
+              else ("Has the time allowed for filing the charge sheet expired, and does that give a right to default bail?", f"No charge sheet is confirmed and {custody_days} days have passed since arrest."))
+    if case_input.get("first_time_offender"):
+        qs.append(("Does the first-time-offender rule in the custody provisions apply to this case?", "The details entered say there is no previous case."))
+    acts = rag_retrieval.detect_acts(f"{spec} {secs}")
+    if "NDPS" in acts:
+        qs.append(("Which quantity category applies (small, intermediate or commercial), and do the Section 37 conditions apply?", "NDPS bail rules depend on the quantity recovered."))
+    if "POCSO" in acts:
+        qs.append(("What do the POCSO provisions require at the bail stage, and what protection applies to the child witness?", "A POCSO section was entered."))
+    if acts & {"PMLA", "UAPA"}:
+        qs.append(("Do the stricter twin conditions for this Act apply, and how have courts applied them?", "A special Act with stricter bail conditions was entered."))
+    if "PC_ACT" in acts:
+        qs.append(("Was sanction for prosecution obtained, and how does it affect bail?", "A corruption-law section was entered."))
+    for flag, label in (("flight_risk", "flight"), ("witness_risk", "witness-tampering"), ("evidence_risk", "evidence-tampering")):
+        if case_input.get(flag):
+            qs.append((f"Which bail conditions could answer the {label} concern that is recorded?", f"A {label} risk is recorded in the details."))
+    qs.append(("Which documents and upcoming hearing dates should be confirmed with the court record?", "The details here are user-entered and unverified."))
+
+    if not case_input.get("arrest_date"):
+        missing.append("No arrest date was entered, so custody length could not be calculated.")
+    if not secs and not spec:
+        missing.append("No sections were entered; the match is based only on the wording of the facts.")
+
+    brief = {"summary": summary, "applicable_provisions": provisions, "how_similar_cases_ended": similar_items,
+             "procedural_options": options, "questions_for_lawyer": [{"question": q, "reason": r} for q, r in qs],
+             "missing_information": missing, "mode": "extractive"}
+    brief, stats = _validate_brief(brief, set(registry))
+    brief["checks"] = {**stats, "privacy_masked": {}}
+    brief["sources"] = registry
+    return brief
+
+
 def outcome_summary(similar: list[dict]) -> dict:
     c = Counter(r.get("bail_outcome", "") for r in similar)
     return {"retrieved": len(similar), "granted": c.get("Granted", 0), "rejected": c.get("Rejected", 0),
@@ -358,15 +485,25 @@ def analyze(case_input: dict, custody_days: int, assessment: dict, top_k: int = 
     result = {"similar_cases": similar, "outcome_summary": outcome_summary(similar),
               "retrieval_mode": index.mode, "categories": sorted(categories), "acts": sorted(acts),
               "brief": None, "brief_status": "ok", "disclaimer": DISCLAIMER}
-    if not llm_available():
-        result["brief_status"] = "llm_unavailable"
-        result["brief_message"] = "Start Ollama and download the model (see README) to enable the written brief. Similar judgments and rule-based triggers are shown below."
-        return result
     try:
         ref = reference_sources(case_input.get("sections", ""), case_input.get("special_laws", ""),
                                 case_input.get("bail_type", ""), bool(case_input.get("first_time_offender")), categories)
-        result["brief"] = generate_brief(case_input, custody_days, assessment, similar, ref, redact_terms)
-    except Exception as exc:  # network, auth, rate-limit, malformed output: keep the rest of the page working
+    except Exception:
+        ref = {"offenses": [], "rules": [], "landmarks": [], "checklist": []}
+    if llm_available():
+        try:
+            result["brief"] = generate_brief(case_input, custody_days, assessment, similar, ref, redact_terms)
+            return result
+        except Exception as exc:  # network, rate limit, malformed output: fall back instead of showing nothing
+            result["brief_message"] = (f"The AI writer could not be used ({type(exc).__name__}: {str(exc)[:160]}). "
+                                       "This brief was assembled directly from the retrieved sources instead.")
+    else:
+        result["brief_message"] = ("No AI model is configured, so this brief was assembled directly from the retrieved sources "
+                                   "using fixed rules. Set LLM_API_KEY (free) or start Ollama for AI-written text.")
+    try:
+        result["brief"] = extractive_brief(case_input, custody_days, assessment, similar, ref)
+        result["brief_status"] = "extractive"
+    except Exception as exc:
         result["brief_status"] = "error"
-        result["brief_message"] = f"The written brief could not be generated ({type(exc).__name__}). Retrieval results are still shown."
+        result["brief_message"] = f"The brief could not be built ({type(exc).__name__}). Retrieval results are still shown."
     return result
