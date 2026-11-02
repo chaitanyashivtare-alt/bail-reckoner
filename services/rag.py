@@ -19,7 +19,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from services import llm, rag_retrieval
+from services import llm, rag_retrieval, text_fields
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "bail_reckoner.db"
@@ -141,11 +141,22 @@ EXTRACT_SYSTEM = (
 
 
 def extract_fields(text: str, redact_terms: list[str] | None = None) -> dict:
-    if not llm_available():
-        raise RuntimeError("The local AI model (Ollama) is not running")
-    masked, counts = mask_pii(text[:MAX_FACT_CHARS * 2], redact_terms)
-    data = _call_tool(EXTRACT_SYSTEM, f"<document>\n{masked}\n</document>", EXTRACT_TOOL, max_tokens=1500)
-    data["privacy"] = {"masked": counts}
+    """Read the form fields from chargesheet text. Uses an AI model when one is available, and plain
+    text rules otherwise (or if the model fails), so Auto-fill always does something useful."""
+    fallback_reason = ""
+    if llm_available():
+        try:
+            masked, counts = mask_pii(text[:MAX_FACT_CHARS * 2], redact_terms)
+            data = _call_tool(EXTRACT_SYSTEM, f"<document>\n{masked}\n</document>", EXTRACT_TOOL, max_tokens=1500)
+            data["privacy"] = {"masked": counts}
+            data["method"] = "ai"
+            return data
+        except Exception as exc:
+            fallback_reason = f"AI reading failed ({type(exc).__name__}); used simple text rules instead."
+    data = text_fields.extract(text)          # runs locally: nothing is sent anywhere
+    data["privacy"] = {"masked": {}}
+    if fallback_reason:
+        data["note"] = fallback_reason
     return data
 
 

@@ -37,6 +37,7 @@ from engine import custody_days, search_cases, rule_assessment, database_stats
 from services import rag as rag_service
 from services import llm
 from services import lawyer_match
+from services import text_fields
 
 DB_PATH = ROOT / "bail_reckoner.db"
 FRONTEND = ROOT / "frontend"
@@ -299,9 +300,8 @@ async def rag_extract_fields(req: RagExtractRequest, request: Request):
     """Read chargesheet text and return the form fields it states (for the user to review)."""
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="No text to read.")
-    if not rag_service.llm_available():
-        raise HTTPException(status_code=503, detail="AI auto-fill needs a model: set LLM_API_KEY (free Gemini or Groq key) in .env, or start Ollama. You can fill the form by hand.")
-    _rag_rate_limit(request)
+    if rag_service.llm_available():
+        _rag_rate_limit(request)             # only AI calls use quota; the rule-based reader is free
     try:
         return rag_service.extract_fields(req.text, req.redact_terms)
     except Exception as exc:
@@ -311,27 +311,50 @@ async def rag_extract_fields(req: RagExtractRequest, request: Request):
 @app.post("/api/rag/analyze")
 async def rag_analyze(req: RagAnalyzeRequest, request: Request):
     """Retrieve similar judgments, write a cited brief, and suggest lawyers."""
-    days = 0
-    if req.arrest_date:
-        try:
-            days = custody_days(req.arrest_date)
-        except Exception:
-            pass
-    assessment = rule_assessment(req.sections, req.special_laws, req.bail_type, days, req.charge_sheet_filed,
-                                 req.first_time_offender, req.flight_risk, req.witness_risk, req.evidence_risk)
-    if rag_service.llm_available():
-        _rag_rate_limit(request)
-    case_input = {"sections": req.sections, "special_laws": req.special_laws, "bail_type": req.bail_type,
-                  "arrest_date": req.arrest_date, "charge_sheet_filed": req.charge_sheet_filed,
-                  "first_time_offender": req.first_time_offender, "flight_risk": req.flight_risk,
-                  "witness_risk": req.witness_risk, "evidence_risk": req.evidence_risk, "facts": req.case_facts}
     if not (req.sections.strip() or req.special_laws.strip() or req.case_facts.strip()):
         raise HTTPException(status_code=400, detail="Enter sections or case facts to analyze.")
+    eff = {"sections": req.sections, "special_laws": req.special_laws, "bail_type": req.bail_type,
+           "arrest_date": req.arrest_date, "charge_sheet_filed": req.charge_sheet_filed,
+           "first_time_offender": req.first_time_offender, "court": req.court, "region": req.region}
+    retrieval_query = req.retrieval_query
+    autofilled: dict = {}
+    # The form was left empty but a document was supplied: read the key fields from the text by simple rules,
+    # and say so on the page. Anything the user did enter is never overwritten.
+    if not req.sections.strip() and not req.special_laws.strip() and len(req.case_facts.strip()) > 80:
+        d = text_fields.extract(req.case_facts)
+        for key, value in (("sections", d["sections"]), ("special_laws", d["special_laws"]), ("arrest_date", d["arrest_date"]),
+                           ("court", d["court"]), ("region", d["region"])):
+            if value and not str(eff[key]).strip():
+                eff[key] = value
+                autofilled[key] = value
+        for key, value in (("charge_sheet_filed", d["charge_sheet_filed"]), ("first_time_offender", d["first_time_offender"])):
+            if value and not eff[key]:
+                eff[key] = True
+                autofilled[key] = True
+        if d["bail_type"] != "Regular" and eff["bail_type"] == "Regular":
+            eff["bail_type"] = d["bail_type"]
+            autofilled["bail_type"] = d["bail_type"]
+        retrieval_query = retrieval_query or d["retrieval_query"]
+    days = 0
+    if eff["arrest_date"]:
+        try:
+            days = custody_days(eff["arrest_date"])
+        except Exception:
+            pass
+    assessment = rule_assessment(eff["sections"], eff["special_laws"], eff["bail_type"], days, eff["charge_sheet_filed"],
+                                 eff["first_time_offender"], req.flight_risk, req.witness_risk, req.evidence_risk)
+    if rag_service.llm_available():
+        _rag_rate_limit(request)
+    case_input = {**{k: eff[k] for k in ("sections", "special_laws", "bail_type", "arrest_date", "charge_sheet_filed", "first_time_offender")},
+                  "flight_risk": req.flight_risk, "witness_risk": req.witness_risk, "evidence_risk": req.evidence_risk,
+                  "facts": req.case_facts}
     result = rag_service.analyze(case_input, days, assessment, top_k=max(3, min(req.top_k + 1, 8)),
-                                 redact_terms=req.redact_terms, retrieval_query=req.retrieval_query)
-    result["lawyers"] = lawyer_match.match(result["acts"], result["categories"], req.court, req.region, req.languages)
+                                 redact_terms=req.redact_terms, retrieval_query=retrieval_query)
+    result["lawyers"] = lawyer_match.match(result["acts"], result["categories"], eff["court"], eff["region"], req.languages)
     result["custody_days"] = days
     result["assessment"] = assessment
+    result["effective_input"] = eff
+    result["autofilled"] = autofilled
     return result
 
 

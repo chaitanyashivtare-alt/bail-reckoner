@@ -241,7 +241,10 @@ def test_api_analyze_with_fake_local_model(client):
 def test_api_without_local_model_degrades_gracefully(client):
     r = client.post("/api/rag/analyze", json={"sections": "302", "case_facts": "murder case"})
     assert r.status_code == 200 and r.json()["brief_status"] == "extractive" and r.json()["similar_cases"] and r.json()["brief"]["sources"]
-    assert client.post("/api/rag/extract-fields", json={"text": "abc"}).status_code == 503
+    # Auto-fill no longer needs a model: it falls back to the rule-based reader.
+    r2 = client.post("/api/rag/extract-fields", json={"text": "Sections: NDPS Act 20(b)(ii)(B), 29. Arrested on 02-03-2026."})
+    assert r2.status_code == 200 and r2.json()["method"] == "rules" and r2.json()["arrest_date"] == "2026-03-02"
+    assert client.post("/api/rag/extract-fields", json={"text": "   "}).status_code == 400
     assert client.post("/api/rag/analyze", json={}).status_code == 400
 
 

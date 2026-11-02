@@ -188,7 +188,7 @@ The optional `evaluate.py` experiment uses stratified train/validation/test spli
 
 ## RAG research brief (new)
 
-Upload a text-based chargesheet PDF on **Analyze Your Case**. Optionally press **Auto-fill** to have the local AI model read the text and fill the form (you review every field), then **Analyze**. The result page now shows:
+Upload a text-based chargesheet PDF on **Analyze Your Case**. Press **Auto-fill** to fill the form from the text (simple text rules by default, no AI needed; an AI model is used instead if one is configured). Review every field, then **Analyze**. The result page now shows:
 
 - a **cited research brief**: applicable provisions, how similar judgments were decided and why, procedural issues to discuss with a lawyer, case-specific questions, and what the document does not state. Every point carries source chips (`C1`, `S1`, `R1`, `L1`, `K1`) that open the exact passage, statute-table row, custody rule, landmark judgment or checklist item it came from;
 - the retrieved judgments with a plain-language reason for each match ("shares section 302", "same Act: NDPS");

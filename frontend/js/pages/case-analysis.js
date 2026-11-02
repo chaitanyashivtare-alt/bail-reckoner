@@ -128,6 +128,8 @@ export function render() {
     const briefStatus = caseData?.brief_status || '';
     const briefMessage = caseData?.brief_message || '';
     const lawyers = caseData?.lawyers || [];
+    const autofilled = caseData?.autofilled || {};
+    const autofilledNames = Object.keys(autofilled).map(k => ({ sections: 'sections', special_laws: 'special-law sections', arrest_date: 'arrest date', court: 'court', region: 'state', charge_sheet_filed: 'charge sheet filed', first_time_offender: 'first-time offender', bail_type: 'bail type' })[k] || k);
     const submittedFacts = input.facts?.trim() || '';
     const sectionCount = input.sections ? input.sections.split(/[,;]+/).map(value => value.trim()).filter(Boolean).length : 0;
 
@@ -170,6 +172,7 @@ export function render() {
 
             ${analysisError ? alert(`Automated review could not be completed: ${escapeHtml(analysisError)}. The information below is what you submitted; no similar judgments or automated review result is available.`, 'warning', 'Review service unavailable') : ''}
 
+            ${autofilledNames.length ? alert(`The form was empty, so these details were read from your document by simple text rules (no AI): <strong>${autofilledNames.join(', ')}</strong>. They may be wrong; check them against the document.`, 'info', 'Details read from your document') : ''}
             ${briefMessage ? alert(escapeHtml(briefMessage), brief ? 'info' : 'warning', brief ? 'Brief assembled from retrieved sources' : 'Written brief not available') : ''}
 
             <!-- Summary Stats -->

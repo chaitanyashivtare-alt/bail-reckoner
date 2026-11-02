@@ -33,7 +33,7 @@ export function render() {
             <div class="upload-page" style="margin-top: var(--space-6)">
                 <div class="upload-container">
                     ${uploadZone('case-file')}
-                    <p style="font-size:var(--text-xs); color:var(--text-tertiary); margin-top:var(--space-3)">The selected PDF is sent to this NyaySetu server for text extraction. It is not added to the app’s case document library. Extracted text is included in your case review and kept in this browser tab’s session. Check and edit the text before continuing. Scanned PDFs are not readable yet. The text is processed only by the local AI model on this computer, and only after you press <strong>Auto-fill</strong> or <strong>Analyze</strong>; phone, ID, e-mail and labelled name/address lines are masked first.</p>
+                    <p style="font-size:var(--text-xs); color:var(--text-tertiary); margin-top:var(--space-3)">The selected PDF is sent to this NyaySetu server for text extraction. It is not added to the app’s case document library. Extracted text is included in your case review and kept in this browser tab’s session. Check and edit the text before continuing. Scanned PDFs are not readable yet. Auto-fill first tries simple text rules on this server. If an AI model has been configured (see README), <strong>Auto-fill</strong> and <strong>Analyze</strong> may send the text to it, after phone, ID, e-mail and labelled name/address lines are masked.</p>
                     
                     <div class="divider-text" style="margin: var(--space-6) 0">Or enter case details manually</div>
                     
@@ -112,7 +112,7 @@ export function render() {
                             <input type="text" class="form-input" id="inp-redact" placeholder="e.g., Vikram Joshi, Neha Joshi, Wanowrie">
                             <p style="font-size:var(--text-xs); color:var(--text-tertiary); margin-top:var(--space-2)">Names inside sentences cannot be found automatically. List them here and they are replaced with [REDACTED] before text leaves this server.</p>
                         </div>
-                        <button class="btn btn-outline w-full" style="margin-top: var(--space-4)" id="autofill-btn" type="button">✨ Auto-fill the form from this text (uses the local AI model)</button>
+                        <button class="btn btn-outline w-full" style="margin-top: var(--space-4)" id="autofill-btn" type="button">✨ Auto-fill the form from this text</button>
                         <button class="btn btn-primary btn-lg w-full" style="margin-top: var(--space-6)" id="analyze-btn">
                             ${icons.search} Start Analysis
                         </button>
@@ -180,12 +180,13 @@ async function autofill() {
         if (d.court) set('inp-court', d.court);
         if (d.region) set('inp-region', d.region);
         const gaps = (d.missing_information || []).length ? ` Not stated in the document: ${d.missing_information.slice(0, 3).join('; ')}.` : '';
-        showToast('Form filled from your document. Check every field before analysing.' + gaps, 'success');
+        const how = d.method === 'rules' ? 'Form filled using simple text rules (no AI). ' : 'Form filled by AI. ';
+        showToast(how + 'Check every field before analysing.' + gaps, d.method === 'rules' ? 'info' : 'success');
     } catch (error) {
         showToast(error.message || 'Auto-fill is unavailable. Please fill the form manually.', 'warning');
     } finally {
         btn.disabled = false;
-        btn.textContent = '✨ Auto-fill the form from this text (uses the local AI model)';
+        btn.textContent = '✨ Auto-fill the form from this text';
     }
 }
 
@@ -317,7 +318,11 @@ async function runAnalysis() {
 
         setCurrentCase({
             ...result,
-            input: { sections, specialLaws, bailType, arrestDate, chargeSheet, firstTime, flight, witness, evidence, facts, court: payload.court, region: payload.region },
+            input: result.effective_input ? {
+                sections: result.effective_input.sections, specialLaws: result.effective_input.special_laws, bailType: result.effective_input.bail_type,
+                arrestDate: result.effective_input.arrest_date, chargeSheet: result.effective_input.charge_sheet_filed, firstTime: result.effective_input.first_time_offender,
+                flight, witness, evidence, facts, court: result.effective_input.court, region: result.effective_input.region,
+            } : { sections, specialLaws, bailType, arrestDate, chargeSheet, firstTime, flight, witness, evidence, facts, court: payload.court, region: payload.region },
         });
 
         draw(analysisSteps.length);
